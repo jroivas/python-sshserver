@@ -4,6 +4,7 @@ from paramiko.py3compat import decodebytes
 import binascii
 import os
 import paramiko
+import select
 import socket
 import threading
 
@@ -18,8 +19,10 @@ class SSHKeyHandler(object):
         self.keys = []
         self.host_key = os.path.expanduser(host_key)
         self.ssh_keys = {}
-        with open(auth_file, 'r') as fd:
-            self.keys = fd.readlines()
+
+        if auth_file:
+            with open(auth_file, 'r') as fd:
+                self.keys = fd.readlines()
         self.parse_ssh_keys()
         self.parse_host_key()
 
@@ -94,7 +97,7 @@ class SSHServer(paramiko.ServerInterface):
         @param key_handler Instance of SSHKeyHandler
         """
         self.event = threading.Event()
-        self.ssh_keys = key_handler
+        self.key_handler = key_handler
         self.username = ''
         self.key = ''
 
@@ -105,6 +108,16 @@ class SSHServer(paramiko.ServerInterface):
         if kind == 'session':
             return paramiko.OPEN_SUCCEEDED
         return paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
+
+    def auth_fail(self):
+        """ Failed authentication
+        """
+        return paramiko.AUTH_FAILED
+
+    def auth_success(self):
+        """ Successful authentication
+        """
+        return paramiko.AUTH_SUCCESSFUL
 
     def check_auth_password(self, username, password):
         """ Check for user password. Disabled by default.
@@ -123,7 +136,7 @@ class SSHServer(paramiko.ServerInterface):
         @param key User provided public key
         @return paramiko.AUTH_SUCCESSFUL if key found for user, paramiko.AUTH_FAILED otherwise
         """
-        keys = self.ssh_keys.user_keys(username)
+        keys = self.key_handler.user_keys(username)
         if not keys:
             return paramiko.AUTH_FAILED
 
@@ -198,16 +211,22 @@ class ThreadedSSHServer(threading.Thread):
 
         return sock
 
-    def accept(self, sock):
+    def accept(self, poller, sock):
         """ Accept connections on socket
 
         @param sock Socket
         @return Tuple of cliend and address, or None
         """
-        try:
-            return sock.accept()
-        except Exception as e:
-            return None
+        # Fast poll
+        # FIXME: hardcoded
+        events = poller.poll(0.1)
+        for _ in events:
+            try:
+                return sock.accept()
+            except Exception as e:
+                pass
+
+        return None
 
     def clean_workers(self, timeout=5, force=False):
         """ Cleanup old worker threads
@@ -221,10 +240,10 @@ class ThreadedSSHServer(threading.Thread):
             cnt += 1
             for worker in self.workers:
                 del_it = False
-                if worker.running and force:
+                if worker.started and worker.running and force:
                     worker.running = False
                     del_it = True
-                elif not worker.running:
+                elif worker.started and not worker.running:
                     del_it = True
 
                 if del_it:
@@ -244,17 +263,19 @@ class ThreadedSSHServer(threading.Thread):
         sock.listen(self.instances)
         if self.verbose:
             print ("Serving on port %s" % (self.port))
+        poller = select.poll()
+        poller.register(sock, select.POLLIN | select.POLLPRI | select.POLLHUP | select.POLLERR)
 
         while True:
             # Listen for new connections
-            client = self.accept(sock)
+            client = self.accept(poller, sock)
 
             self.clean_workers()
             if client is None:
                 continue
 
             # Start new worker thread
-            worker = self.launcher(client[0], self.key_handler)
+            worker = self.launcher(conn=client[0], key_handler=self.key_handler, master=self)
             worker.start()
 
             self.workers.append(worker)
@@ -262,7 +283,7 @@ class ThreadedSSHServer(threading.Thread):
 class SSHThread(threading.Thread):
     """ Base for expandable custom handler threads
     """
-    def __init__(self, conn, key_handler, timeout=30):
+    def __init__(self, conn, key_handler, master, timeout=30, server=SSHServer):
         """
         @param conn Connection socket
         @param key_handler Instance of SSHKeyHandler
@@ -272,6 +293,9 @@ class SSHThread(threading.Thread):
         self.key_handler = key_handler
         self.timeout = timeout
         self.running = False
+        self.started = False
+        self.server_class = server
+        self.master = master
 
     def transport(self):
         """ Initialize paramiko transport
@@ -300,7 +324,7 @@ class SSHThread(threading.Thread):
             self.running = False
             return
 
-        server = SSHServer(key_handler=self.key_handler)
+        server = self.server_class(key_handler=self.key_handler)
         try:
             transport.start_server(server=server)
         except paramiko.SSHException:
@@ -331,18 +355,20 @@ class SSHThread(threading.Thread):
         """ Run the thread
         """
         self.running = True
+        self.started = True
 
-        transporter = self.transport()
-        server = self.serve(transporter)
-        channel = self.channel(transporter)
-        if channel is None:
-            tranporter.close()
+        self._transporter = self.transport()
+        self._server = self.serve(self._transporter)
+        self._channel = self.channel(self._transporter)
+        if self._channel is None:
+            self._transporter.close()
             self.running = False
 
         # Wait for event
-        server.event.wait(10)
-        if not server.event.is_set():
+        self._server.event.wait(10)
+        if not self._server.event.is_set():
             return
 
-        self.handler(transporter, server, channel)
-        channel.close()
+        self.handler()
+        self._channel.close()
+        self._transporter.close()
