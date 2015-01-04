@@ -5,17 +5,17 @@
 import sshserver
 
 class MyHandler(sshserver.SSHThread):
-    def __init__(self, conn, key_handler):
-        sshserver.SSHThread.__init__(self, conn, key_handler)
+    def __init__(self, conn, key_handler, master):
+        sshserver.SSHThread.__init__(self, conn, key_handler, master)
 
-    def handler(self, transport, server, channel):
-        channel.send('Hi %s, fingerprint %s\r\n' %
-            (server.username,
-             self.key_handler.key_str(server.key.get_fingerprint())))
-        channel.send('Write "exit" to quit.\r\n\r\n')
+    def handler(self):
+        self._channel.send('Hi %s, fingerprint %s\r\n' %
+            (self._server.username,
+             self.key_handler.key_str(self._server.key.get_fingerprint())))
+        self._channel.send('Write "exit" to quit.\r\n\r\n')
 
-        fd = channel.makefile('rU')
-        channel.send('entry: ')
+        fd = self._channel.makefile('rU')
+        self._channel.send('entry: ')
         data = ''
 
         while self.running:
@@ -23,17 +23,17 @@ class MyHandler(sshserver.SSHThread):
             if ord(tmp) == 127:  # Special backspace
                 if data:
                     data = data[:-1]
-                    channel.send('\b \b')
+                    self._channel.send('\b \b')
             elif tmp == '\n' or tmp == '\r':
-                channel.send('\r\n')
+                self._channel.send('\r\n')
                 if data.strip() == 'exit':
                     self.running = False
-                channel.send(data.strip() + '\r\n')
-                channel.send('entry: ')
+                self._channel.send(data.strip() + '\r\n')
+                self._channel.send('entry: ')
                 data = ''
             else:
                 data += tmp
-                channel.send(tmp)
+                self._channel.send(tmp)
 
 
 if __name__ == '__main__':
