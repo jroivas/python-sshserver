@@ -182,7 +182,7 @@ class SSHServer(paramiko.ServerInterface):
 class ThreadedSSHServer(threading.Thread):
     """ Provides threaded SSH server
     """
-    def __init__(self, launcher, key_handler, port=2200, instances=100, verbose=False):
+    def __init__(self, launcher, key_handler, port=2200, instances=100, verbose=False, poll_interval=0.1):
         """
         @param launcher Launcher for per-connection handlers
         @param key_handler Instance of SSHKeyHandler
@@ -196,6 +196,7 @@ class ThreadedSSHServer(threading.Thread):
         self.instances = instances
         self.workers = []
         self.verbose = verbose
+        self.poll_interval = poll_interval
 
     def __del__(self):
         self.clean_workers(force=True)
@@ -214,12 +215,12 @@ class ThreadedSSHServer(threading.Thread):
     def accept(self, poller, sock):
         """ Accept connections on socket
 
+        @param poll Poll instance, where sock is registered
         @param sock Socket
         @return Tuple of cliend and address, or None
         """
         # Fast poll
-        # FIXME: hardcoded
-        events = poller.poll(0.1)
+        events = poller.poll(self.poll_interval)
         for _ in events:
             try:
                 return sock.accept()

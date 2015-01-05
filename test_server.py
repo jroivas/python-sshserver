@@ -5,9 +5,6 @@
 import sshserver
 
 class MyHandler(sshserver.SSHThread):
-    def __init__(self, conn, key_handler, master):
-        sshserver.SSHThread.__init__(self, conn, key_handler, master)
-
     def handler(self):
         self._channel.send('Hi %s, fingerprint %s\r\n' %
             (self._server.username,
