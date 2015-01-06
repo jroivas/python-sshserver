@@ -19,6 +19,7 @@ class SSHKeyHandler(object):
         self.keys = []
         self.host_key = os.path.expanduser(host_key)
         self.ssh_keys = {}
+        self.auth_file = auth_file
 
         if auth_file:
             with open(auth_file, 'r') as fd:
